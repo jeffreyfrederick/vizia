@@ -279,6 +279,17 @@ impl Context {
         self.frame_timings.last
     }
 
+    /// Limits how many frames per second the backend presents. See
+    /// [`EventContext::set_max_frame_rate`].
+    pub fn set_max_frame_rate(&mut self, fps: Option<f64>) {
+        self.frame_timings.max_frame_rate = fps;
+    }
+
+    /// Refresh rate (Hz) of the display showing the window, if the backend reports it.
+    pub fn display_refresh_rate(&self) -> Option<f64> {
+        self.frame_timings.display_refresh_rate
+    }
+
     /// Mark the application as needing to rerun the draw method
     pub fn needs_redraw(&mut self, entity: Entity) {
         if self.entity_manager.is_alive(entity) {

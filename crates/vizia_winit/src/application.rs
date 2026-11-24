@@ -106,6 +106,8 @@ pub struct Application {
     event_loop_proxy: EventLoopProxy<UserEvent>,
     windows: HashMap<WindowId, WinState>,
     window_ids: HashMap<Entity, WindowId>,
+    /// Earliest time the next frame may start, when the app limits the frame rate.
+    next_frame_due: Option<Instant>,
     #[cfg(feature = "accesskit")]
     accesskit_adapter: Option<accesskit_winit::Adapter>,
     #[cfg(feature = "accesskit")]
@@ -164,6 +166,7 @@ impl Application {
             event_loop_proxy: proxy,
             windows: HashMap::new(),
             window_ids: HashMap::new(),
+            next_frame_due: None,
             #[cfg(feature = "accesskit")]
             accesskit_adapter: None,
             #[cfg(feature = "accesskit")]
@@ -298,6 +301,9 @@ impl Application {
         let window_id = window_state.window.id();
         self.windows.insert(window_id, window_state);
         self.window_ids.insert(window_entity, window_id);
+        if window_entity == Entity::root() {
+            self.cx.set_display_refresh_rate(monitor_refresh_rate(&window));
+        }
         Ok(window)
     }
 
@@ -546,6 +552,10 @@ impl ApplicationHandler<UserEvent> for Application {
 
             winit::event::WindowEvent::Moved(position) => {
                 let window_entity = window.entity;
+                if window_entity == Entity::root() {
+                    // The window may now be on a display with a different refresh rate.
+                    self.cx.set_display_refresh_rate(monitor_refresh_rate(window.window()));
+                }
                 self.cx.emit_window_event(
                     window_entity,
                     WindowEvent::WindowMoved(WindowPosition { x: position.x, y: position.y }),
@@ -725,6 +735,9 @@ impl ApplicationHandler<UserEvent> for Application {
             } => {
                 self.cx.set_scale_factor(scale_factor);
                 self.cx.needs_refresh(window.entity);
+                if window.entity == Entity::root() {
+                    self.cx.set_display_refresh_rate(monitor_refresh_rate(window.window()));
+                }
             }
             winit::event::WindowEvent::ThemeChanged(theme) => {
                 let theme = match theme {
@@ -782,11 +795,7 @@ impl ApplicationHandler<UserEvent> for Application {
 
         self.cx.process_style_updates();
 
-        if self.cx.process_animations() {
-            for window in self.windows.values() {
-                window.window().request_redraw();
-            }
-        }
+        let mut wants_redraw = self.cx.process_animations();
         let style_done = Instant::now();
         self.cx.record_frame_phase(FramePhase::Style, style_done - events_done);
 
@@ -820,15 +829,39 @@ impl ApplicationHandler<UserEvent> for Application {
                 .expect("Failed to send event");
         }
 
-        if self.cx.0.windows.iter().any(|(_, window_state)| !window_state.redraw_list.is_empty()) {
-            for window in self.windows.values() {
-                window.window().request_redraw();
+        wants_redraw |=
+            self.cx.0.windows.iter().any(|(_, window_state)| !window_state.redraw_list.is_empty());
+
+        // With a frame-rate limit, a redraw is requested only once the next frame
+        // slot has come; until then the loop sleeps until that slot (or a timer).
+        let mut deferred_until = None;
+        if wants_redraw {
+            let now = Instant::now();
+            match (self.cx.min_frame_interval(), self.next_frame_due) {
+                // Allow a little early: wake-ups are late more often than early,
+                // and the swap still waits for vblank.
+                (Some(_), Some(due)) if now + FRAME_SLOT_SLACK < due => deferred_until = Some(due),
+                (interval, due) => {
+                    for window in self.windows.values() {
+                        window.window().request_redraw();
+                    }
+                    // Fixed-rate slots keep the average rate at the limit even when it
+                    // doesn't divide the refresh rate; after a stall, restart from now
+                    // instead of bursting to catch up.
+                    self.next_frame_due = interval.map(|interval| {
+                        due.filter(|due| now < *due + interval).unwrap_or(now) + interval
+                    });
+                }
             }
         }
 
         if self.control_flow != ControlFlow::Poll {
-            if let Some(timer_time) = self.cx.get_next_timer_time() {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(timer_time));
+            let wake = match (self.cx.get_next_timer_time(), deferred_until) {
+                (Some(timer), Some(due)) => Some(timer.min(due)),
+                (timer, due) => timer.or(due),
+            };
+            if let Some(wake) = wake {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             } else {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
@@ -1207,4 +1240,15 @@ pub fn load_default_cursors(event_loop: &ActiveEventLoop) -> HashMap<CursorIcon,
     }
 
     custom_cursors
+}
+
+/// How early a rate-limited frame may start relative to its slot.
+const FRAME_SLOT_SLACK: Duration = Duration::from_micros(500);
+
+/// Refresh rate (Hz) of the monitor the window is on, if the platform reports it.
+fn monitor_refresh_rate(window: &winit::window::Window) -> Option<f64> {
+    window
+        .current_monitor()
+        .and_then(|m| m.refresh_rate_millihertz())
+        .map(|mhz| mhz as f64 / 1000.0)
 }

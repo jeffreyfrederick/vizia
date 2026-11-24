@@ -22,7 +22,7 @@ use crate::text::TextContext;
 #[cfg(feature = "clipboard")]
 use copypasta::ClipboardProvider;
 
-use super::{LocalizationContext, ModelData};
+use super::{FrameTimingState, LocalizationContext, ModelData};
 
 type Views = HashMap<Entity, Box<dyn ViewHandler>>;
 type Models = HashMap<Entity, HashMap<TypeId, Box<dyn ModelData>>>;
@@ -87,7 +87,7 @@ pub struct EventContext<'a> {
     clipboard: &'a mut Box<dyn ClipboardProvider>,
     pub(crate) event_proxy: &'a mut Option<Box<dyn crate::context::EventProxy>>,
     pub(crate) drop_data: &'a mut Option<DropData>,
-    pub(crate) frame_timings: &'a FrameTimings,
+    pub(crate) frame_timings: &'a mut FrameTimingState,
     pub windows: &'a mut HashMap<Entity, WindowState>,
 }
 
@@ -140,7 +140,7 @@ impl<'a> EventContext<'a> {
             clipboard: &mut cx.clipboard,
             event_proxy: &mut cx.event_proxy,
             drop_data: &mut cx.drop_data,
-            frame_timings: &cx.frame_timings.last,
+            frame_timings: &mut cx.frame_timings,
             windows: &mut cx.windows,
         }
     }
@@ -174,7 +174,7 @@ impl<'a> EventContext<'a> {
             clipboard: &mut cx.clipboard,
             event_proxy: &mut cx.event_proxy,
             drop_data: &mut cx.drop_data,
-            frame_timings: &cx.frame_timings.last,
+            frame_timings: &mut cx.frame_timings,
             windows: &mut cx.windows,
         }
     }
@@ -282,7 +282,26 @@ impl<'a> EventContext<'a> {
     /// Returns per-phase timings of the most recently presented frame, as
     /// reported by the windowing backend. All zero if the backend does not report them.
     pub fn frame_timings(&self) -> FrameTimings {
-        *self.frame_timings
+        self.frame_timings.last
+    }
+
+    /// Limits how many frames per second the backend presents (`None`: no limit
+    /// beyond vsync). Redraws requested sooner are deferred, not dropped; frames
+    /// are scheduled at a fixed rate so the average matches the limit even when
+    /// it doesn't divide the display's refresh rate. Backends that don't support
+    /// it ignore it.
+    pub fn set_max_frame_rate(&mut self, fps: Option<f64>) {
+        self.frame_timings.max_frame_rate = fps;
+    }
+
+    /// The frame-rate limit set with [`set_max_frame_rate`](Self::set_max_frame_rate).
+    pub fn max_frame_rate(&self) -> Option<f64> {
+        self.frame_timings.max_frame_rate
+    }
+
+    /// Refresh rate (Hz) of the display showing the window, if the backend reports it.
+    pub fn display_refresh_rate(&self) -> Option<f64> {
+        self.frame_timings.display_refresh_rate
     }
 
     /// Converts logical points to physical pixels.

@@ -136,6 +136,17 @@ impl BackendContext {
         self.0.frame_timings.finish_frame(presented_at);
     }
 
+    /// Minimum time between the starts of two frames requested by the app via
+    /// `set_max_frame_rate`, if any. Backends that pace frames should honour it.
+    pub fn min_frame_interval(&self) -> Option<Duration> {
+        self.0.frame_timings.min_frame_interval()
+    }
+
+    /// Reports the refresh rate (Hz) of the display showing the window.
+    pub fn set_display_refresh_rate(&mut self, hz: Option<f64>) {
+        self.0.frame_timings.display_refresh_rate = hz;
+    }
+
     /// Calls the draw system.
     pub fn draw(
         &mut self,

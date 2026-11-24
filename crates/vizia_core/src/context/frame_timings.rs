@@ -70,11 +70,16 @@ impl FrameTimings {
     }
 }
 
-/// Accumulates the in-progress frame and keeps the last completed one.
+/// Accumulates the in-progress frame and keeps the last completed one, plus
+/// the frame-pacing settings shared between the app and the backend.
 #[derive(Debug, Default)]
 pub(crate) struct FrameTimingState {
     pub(crate) pending: FrameTimings,
     pub(crate) last: FrameTimings,
+    /// Upper bound on presented frames per second requested by the app.
+    pub(crate) max_frame_rate: Option<f64>,
+    /// Refresh rate of the display the window is on, as reported by the backend.
+    pub(crate) display_refresh_rate: Option<f64>,
 }
 
 impl FrameTimingState {
@@ -85,5 +90,12 @@ impl FrameTimingState {
         done.presented_at = Some(presented_at);
         done.frame_count = self.last.frame_count + 1;
         self.last = done;
+    }
+
+    /// Minimum time between the starts of two frames, if a frame-rate limit is set.
+    pub(crate) fn min_frame_interval(&self) -> Option<Duration> {
+        self.max_frame_rate
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .map(|r| Duration::from_secs_f64(1.0 / r))
     }
 }
