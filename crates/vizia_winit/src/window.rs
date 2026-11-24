@@ -209,8 +209,17 @@ impl WinState {
         &self.window
     }
 
+    /// Makes this window's GL context current, unless it already is.
+    ///
+    /// Each window owns its context and only ever binds it to its own surface,
+    /// so "context is current" implies the right surface is bound. Skipping the
+    /// redundant `wglMakeCurrent` matters: some drivers (e.g. NVIDIA with
+    /// threaded optimization) synchronize with their worker thread on every
+    /// make-current call and spin-wait until a pending swap has been presented.
     pub fn make_current(&mut self) {
-        self.gl_context.make_current(&self.gl_surface).unwrap();
+        if !self.gl_context.is_current() {
+            self.gl_context.make_current(&self.gl_surface).unwrap();
+        }
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
