@@ -22,7 +22,10 @@ pub(crate) fn draw_system(
 
     let window = cx.windows.get_mut(&window_entity).unwrap();
 
-    let mut dirty_rect = std::mem::take(&mut window.dirty_rect);
+    let mut damage = DamageRegion::default();
+    if let Some(rect) = std::mem::take(&mut window.dirty_rect) {
+        damage.add(rect);
+    }
     let redraw_list = std::mem::take(&mut window.redraw_list);
 
     // Note: dirty_rect can be populated by entity removal independently of
@@ -50,13 +53,13 @@ pub(crate) fn draw_system(
                 .draw_bounds
                 .get(entity)
                 .map_or(draw_bounds, |prev_bounds| draw_bounds.union(prev_bounds));
-            union_dirty_rect(&mut dirty_rect, dirty_bounds);
+            damage.add(dirty_bounds);
             cx.cache.draw_bounds.insert(entity, draw_bounds);
         } else {
             // If the entity was previously visible but is no longer, we must dirty
             // its previous area so that it is correctly cleared from the screen.
             if let Some(previous_draw_bounds) = cx.cache.draw_bounds.remove(entity) {
-                union_dirty_rect(&mut dirty_rect, previous_draw_bounds);
+                damage.add(previous_draw_bounds);
             }
         }
     }
@@ -83,17 +86,11 @@ pub(crate) fn draw_system(
                     cx.cache.draw_bounds.insert(entity, filter_current_bounds);
 
                     if filter_current_bounds.w > 0.0 && filter_current_bounds.h > 0.0 {
-                        // Ensure bounds are valid
-                        // Condition to update dirty_rect:
-                        // 1. dirty_rect is None (then set it to filter_current_bounds).
-                        // 2. dirty_rect is Some, and filter_current_bounds intersects with it (then union).
-                        if dirty_rect.is_none_or(|current_dr_val| {
-                            filter_current_bounds.intersects(&current_dr_val)
-                        }) {
-                            dirty_rect =
-                                Some(dirty_rect.map_or(filter_current_bounds, |current_dr_val| {
-                                    current_dr_val.union(&filter_current_bounds)
-                                }));
+                        // A filtered view must be repainted whenever anything it
+                        // overlaps is (its output depends on what is behind it),
+                        // or when there is no damage yet (full repaint).
+                        if damage.is_empty() || damage.intersects(&filter_current_bounds) {
+                            damage.add(filter_current_bounds);
                         }
                     }
                 }
@@ -101,7 +98,7 @@ pub(crate) fn draw_system(
                 // Entity is INVISIBLE but has (or had) a filter style.
                 // Its *previous* bounds need to be added to dirty_rect.
                 if let Some(previous_draw_bounds) = cx.cache.draw_bounds.get(entity).copied() {
-                    union_dirty_rect(&mut dirty_rect, previous_draw_bounds);
+                    damage.add(previous_draw_bounds);
                 }
 
                 // Remove from cache as it's no longer visible with these bounds.
@@ -116,50 +113,61 @@ pub(crate) fn draw_system(
 
     let canvas = dirty_surface.canvas();
 
-    canvas.save();
-
-    if let Some(rect) = dirty_rect.map(Rect::from) {
-        canvas.clip_rect(rect, ClipOp::Intersect, false);
-        canvas.clear(Color::transparent());
-    }
-
     cx.resource_manager.mark_images_unused();
 
-    let mut queue = BinaryHeap::new();
-    queue.push(ZEntity { index: 0, entity: window_entity, visible: true });
+    // Repaint each damaged area separately (an empty region means everything).
+    // Each pass is a plain rect clip so it stays cheap on the GPU, and views
+    // outside the pass's rect are skipped.
+    let passes: Vec<Option<BoundingBox>> = if damage.is_empty() {
+        vec![None]
+    } else {
+        damage.rects.iter().copied().map(Some).collect()
+    };
 
-    while let Some(zentity) = queue.pop() {
+    for pass in &passes {
         canvas.save();
-        draw_entity(
-            &mut DrawContext {
-                current: zentity.entity,
-                style: &cx.style,
-                cache: &mut cx.cache,
-                tree: &cx.tree,
-                models: &cx.models,
-                views: &mut cx.views,
-                resource_manager: &cx.resource_manager,
-                text_context: &mut cx.text_context,
-                modifiers: &cx.modifiers,
-                mouse: &cx.mouse,
-                windows: &mut cx.windows,
-            },
-            &dirty_rect,
-            canvas,
-            zentity.index,
-            &mut queue,
-            zentity.visible,
-        );
+
+        if let Some(rect) = pass.map(Rect::from) {
+            canvas.clip_rect(rect, ClipOp::Intersect, false);
+            canvas.clear(Color::transparent());
+        }
+
+        let mut queue = BinaryHeap::new();
+        queue.push(ZEntity { index: 0, entity: window_entity, visible: true });
+
+        while let Some(zentity) = queue.pop() {
+            canvas.save();
+            draw_entity(
+                &mut DrawContext {
+                    current: zentity.entity,
+                    style: &cx.style,
+                    cache: &mut cx.cache,
+                    tree: &cx.tree,
+                    models: &cx.models,
+                    views: &mut cx.views,
+                    resource_manager: &cx.resource_manager,
+                    text_context: &mut cx.text_context,
+                    modifiers: &cx.modifiers,
+                    mouse: &cx.mouse,
+                    windows: &mut cx.windows,
+                },
+                pass,
+                canvas,
+                zentity.index,
+                &mut queue,
+                zentity.visible,
+            );
+            canvas.restore();
+        }
+
         canvas.restore();
     }
-
-    canvas.restore();
 
     // surface.canvas().clear(Color::transparent());
     dirty_surface.draw(surface.canvas(), (0, 0), SamplingOptions::default(), None);
 
-    // Debug draw dirty rect
-    // if let Some(rect) = dirty_rect.map(Rect::from) {
+    // Debug draw damage
+    // for rect in damage.rects.iter().copied().map(Rect::from) {
     //     let mut paint = Paint::default();
     //     paint.set_style(skia_safe::PaintStyle::Stroke);
     //     paint.set_color(Color::red());
@@ -188,15 +196,72 @@ fn apply_clip_shapes(canvas: &Canvas, shapes: &[skia_safe::Path]) {
     }
 }
 
-fn union_dirty_rect(dirty_rect: &mut Option<BoundingBox>, bounds: BoundingBox) {
-    if bounds.w <= 0.0 || bounds.h <= 0.0 {
-        return;
+/// The areas of a window that need repainting this frame.
+///
+/// Damage used to be a single rect: the union of every changed view. Two small
+/// animations at opposite corners of a window (say a playhead and a meter)
+/// then repainted everything in between. Keeping a few disjoint rects instead
+/// limits repainting to what changed, at the cost of one tree traversal per
+/// rect, so overlapping/touching rects are merged and the count is capped.
+#[derive(Default)]
+struct DamageRegion {
+    rects: Vec<BoundingBox>,
+}
+
+impl DamageRegion {
+    /// More rects mean more traversals; beyond this, the closest rects are merged.
+    const MAX_RECTS: usize = 6;
+
+    fn is_empty(&self) -> bool {
+        self.rects.is_empty()
     }
 
-    if let Some(current) = dirty_rect.as_mut() {
-        *current = current.union(&bounds);
-    } else {
-        *dirty_rect = Some(bounds);
+    fn intersects(&self, bounds: &BoundingBox) -> bool {
+        self.rects.iter().any(|r| r.intersects(bounds))
+    }
+
+    fn add(&mut self, bounds: BoundingBox) {
+        if bounds.w <= 0.0 || bounds.h <= 0.0 {
+            return;
+        }
+        // Whole device pixels, so neighbouring passes neither overlap nor leave gaps.
+        let mut rect = BoundingBox::from_min_max(
+            bounds.left().floor(),
+            bounds.top().floor(),
+            bounds.right().ceil(),
+            bounds.bottom().ceil(),
+        );
+        // Absorb every rect that overlaps or touches the new one.
+        while let Some(i) = self.rects.iter().position(|r| Self::touches(r, &rect)) {
+            rect = rect.union(&self.rects.swap_remove(i));
+        }
+        self.rects.push(rect);
+
+        if self.rects.len() > Self::MAX_RECTS {
+            // Merge the pair whose union wastes the least area, then re-insert
+            // it so it absorbs anything it now overlaps.
+            let area = |r: &BoundingBox| r.w * r.h;
+            let mut best = (f32::INFINITY, 0, 1);
+            for i in 0..self.rects.len() {
+                for j in i + 1..self.rects.len() {
+                    let (a, b) = (&self.rects[i], &self.rects[j]);
+                    let waste = area(&a.union(b)) - area(a) - area(b);
+                    if waste < best.0 {
+                        best = (waste, i, j);
+                    }
+                }
+            }
+            let b = self.rects.swap_remove(best.2);
+            let a = self.rects.swap_remove(best.1);
+            self.add(a.union(&b));
+        }
+    }
+
+    fn touches(a: &BoundingBox, b: &BoundingBox) -> bool {
+        a.left() <= b.right()
+            && b.left() <= a.right()
+            && a.top() <= b.bottom()
+            && b.top() <= a.bottom()
     }
 }
 
