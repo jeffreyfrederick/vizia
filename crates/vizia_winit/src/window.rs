@@ -193,6 +193,9 @@ impl WinState {
             .new_surface_with_dimensions((inner_size.width as i32, inner_size.height as i32))
             .unwrap();
 
+        #[cfg(target_os = "macos")]
+        pin_srgb_color_space(&window);
+
         // Build our window
         Ok(WinState {
             entity,
@@ -804,5 +807,54 @@ impl WindowModifiers for Handle<'_, Window> {
         }
 
         self
+    }
+}
+
+/// Tags the window's backing store as sRGB, the space Skia renders in.
+///
+/// Otherwise AppKit tags the window with the colour space of the display it is
+/// on. After the window moved to a display with a different profile, the
+/// window server colour-matched some frames for the old display and some for
+/// the new one, so the whole window flickered between two tints (measured on
+/// macOS 26 / M1: 38-67 whole-window flips per 20 s at 60 fps, ~975 uncapped;
+/// 0 with this; a resize on the new display also cleared it). Pinning sRGB also
+/// makes colours consistent across displays (on a wide-gamut display they are
+/// now converted instead of shown slightly oversaturated).
+///
+/// `[[view window] setColorSpace:[NSColorSpace sRGBColorSpace]]` through the
+/// Objective-C runtime, so no new dependency.
+#[cfg(target_os = "macos")]
+fn pin_srgb_color_space(window: &winit::window::Window) {
+    use std::ffi::{c_char, c_void};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[link(name = "objc", kind = "dylib")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {}
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: AppKit calls on the main thread (windows are created there),
+    // with objc_msgSend cast to each method's exact signature.
+    unsafe {
+        let send0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send1: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let view = h.ns_view.as_ptr();
+        let ns_window = send0(view, sel_registerName(c"window".as_ptr()));
+        let class = objc_getClass(c"NSColorSpace".as_ptr());
+        if ns_window.is_null() || class.is_null() {
+            return;
+        }
+        let srgb = send0(class, sel_registerName(c"sRGBColorSpace".as_ptr()));
+        if !srgb.is_null() {
+            send1(ns_window, sel_registerName(c"setColorSpace:".as_ptr()), srgb);
+        }
     }
 }
