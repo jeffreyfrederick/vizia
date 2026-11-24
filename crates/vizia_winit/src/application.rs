@@ -181,7 +181,13 @@ impl Application {
         #[allow(unused_mut)]
         let mut window_attributes = apply_window_description(window_description);
 
-        let window_state = WinState::new(event_loop, window_entity, window_attributes, owner)?;
+        let window_state = WinState::new(
+            event_loop,
+            window_entity,
+            window_attributes,
+            owner,
+            window_description.vsync,
+        )?;
         let window = window_state.window.clone();
 
         if let Some(position) = window_description.position {

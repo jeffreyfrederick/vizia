@@ -25,7 +25,7 @@ use glutin::{
     context::{ContextApi, ContextAttributesBuilder},
     display::GetGlDisplay,
     prelude::*,
-    surface::{SurfaceAttributesBuilder, WindowSurface},
+    surface::{SurfaceAttributesBuilder, SwapInterval, WindowSurface},
 };
 
 use skia_safe::{
@@ -68,6 +68,7 @@ impl WinState {
         entity: Entity,
         #[allow(unused_mut)] mut window_attributes: WindowAttributes,
         #[allow(unused_variables)] owner: Option<Arc<winit::window::Window>>,
+        vsync: bool,
     ) -> Result<Self, Box<dyn Error>> {
         #[cfg(target_os = "windows")]
         let (window, gl_config) = {
@@ -138,11 +139,16 @@ impl WinState {
 
         let gl_context = not_current_gl_context.make_current(&gl_surface).unwrap();
 
-        // if window_description.vsync {
-        //     gl_surface
-        //         .set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()))
-        //         .expect("Failed to set vsync");
-        // }
+        // Apply the requested swap interval explicitly rather than relying on the
+        // driver default (which users can override, e.g. in the NVIDIA control panel).
+        let interval = if vsync {
+            SwapInterval::Wait(NonZeroU32::new(1).unwrap())
+        } else {
+            SwapInterval::DontWait
+        };
+        if let Err(err) = gl_surface.set_swap_interval(&gl_context, interval) {
+            log::warn!("Failed to set swap interval ({interval:?}): {err}");
+        }
 
         // Build skia renderer
         gl::load_with(|s| {
