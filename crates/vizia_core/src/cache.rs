@@ -1,6 +1,8 @@
 //! The cache is a store for intermediate data produced while computing state, notably layout
 //! results. The main type here is CachedData, usually accessed via `cx.cache`.
 
+use std::rc::Rc;
+
 use crate::prelude::*;
 use skia_safe::{Matrix, Paint, Path};
 use vizia_storage::SparseSet;
@@ -17,6 +19,10 @@ pub struct CachedData {
     pub(crate) geo_changed: SparseSet<GeoChanged>,
     pub(crate) transform: SparseSet<Matrix>,
     pub(crate) clip_path: SparseSet<Option<Path>>,
+    /// The clip of each entity as the list of shapes it is the intersection of
+    /// (ancestors first). Drawing applies these one by one so that rect and
+    /// rounded-rect clips stay analytic on the GPU; see `clipping_system`.
+    pub(crate) clip_shapes: SparseSet<Option<Rc<[Path]>>>,
     pub(crate) path: SparseSet<Path>,
     pub(crate) shadows: SparseSet<ShadowCache>,
 }
@@ -56,6 +62,7 @@ impl CachedData {
         self.geo_changed.remove(entity);
         self.transform.remove(entity);
         self.clip_path.remove(entity);
+        self.clip_shapes.remove(entity);
         self.path.remove(entity);
         self.shadows.remove(entity);
     }

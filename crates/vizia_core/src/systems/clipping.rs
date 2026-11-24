@@ -5,6 +5,8 @@ use skia_safe::{
 };
 use vizia_storage::LayoutTreeIterator;
 
+use std::rc::Rc;
+
 use crate::prelude::*;
 
 /// Computes the clipping path for each entity in the layout tree.
@@ -24,6 +26,7 @@ pub(crate) fn clipping_system(cx: &mut Context) {
 
         if entity == Entity::root() {
             let clip_path = build_clip_path(cx, Entity::root(), bounds);
+            cx.cache.clip_shapes.insert(entity, Some(Rc::from([clip_path.clone()])));
             cx.cache.clip_path.insert(entity, Some(clip_path));
             continue;
         }
@@ -96,6 +99,20 @@ pub(crate) fn clipping_system(cx: &mut Context) {
         } else {
             cx.cache.clip_path.get(parent).cloned().flatten()
         };
+
+        let parent_shapes = if cx.tree.is_window(entity) {
+            None
+        } else {
+            cx.cache.clip_shapes.get(parent).cloned().flatten()
+        };
+        let shapes = match (&clip_path, parent_shapes) {
+            (Some(own), Some(parent)) => {
+                Some(parent.iter().cloned().chain(std::iter::once(own.clone())).collect())
+            }
+            (Some(own), None) => Some(Rc::from([own.clone()])),
+            (None, parent) => parent,
+        };
+        cx.cache.clip_shapes.insert(entity, shapes);
 
         match (clip_path, parent_clip_path) {
             (Some(clip_path), Some(parent_clip_path)) => {

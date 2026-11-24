@@ -170,6 +170,24 @@ pub(crate) fn draw_system(
     true
 }
 
+/// Applies a view's clip as the intersection of its shapes.
+///
+/// Pre-intersecting nested clips into a single path (e.g. a rounded panel
+/// clipped by the window rect) produces a generic path, which the GPU backend
+/// can only apply through a software-rasterized, per-frame clip mask. Rects and
+/// rounded rects applied individually stay analytic.
+fn apply_clip_shapes(canvas: &Canvas, shapes: &[skia_safe::Path]) {
+    for shape in shapes {
+        if let Some(rect) = shape.is_rect() {
+            canvas.clip_rect(rect.0, ClipOp::Intersect, true);
+        } else if let Some(rrect) = shape.is_rrect() {
+            canvas.clip_rrect(rrect, ClipOp::Intersect, true);
+        } else {
+            canvas.clip_path(shape, ClipOp::Intersect, true);
+        }
+    }
+}
+
 fn union_dirty_rect(dirty_rect: &mut Option<BoundingBox>, bounds: BoundingBox) {
     if bounds.w <= 0.0 || bounds.h <= 0.0 {
         return;
@@ -252,8 +270,8 @@ fn draw_entity(
     };
 
     canvas.save();
-    if let Some(Some(clip_path)) = cx.cache.clip_path.get(current) {
-        canvas.clip_path(clip_path, ClipOp::Intersect, true);
+    if let Some(Some(shapes)) = cx.cache.clip_shapes.get(current) {
+        apply_clip_shapes(canvas, shapes);
     }
 
     if let Some(transform) = cx.cache.transform.get(current) {
