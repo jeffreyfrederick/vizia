@@ -730,10 +730,20 @@ impl ApplicationHandler<UserEvent> for Application {
             winit::event::WindowEvent::Occluded(_) => {}
             winit::event::WindowEvent::RedrawRequested => {
                 for window in self.windows.values_mut() {
+                    let start = Instant::now();
                     window.make_current();
+                    let current = Instant::now();
+                    self.cx.record_frame_phase(FramePhase::MakeCurrent, current - start);
                     //self.cx.needs_refresh(window.entity);
-                    if self.cx.draw(window.entity, &mut window.surface, &mut window.dirty_surface) {
-                        window.swap_buffers();
+                    let drew =
+                        self.cx.draw(window.entity, &mut window.surface, &mut window.dirty_surface);
+                    let drawn = Instant::now();
+                    self.cx.record_frame_phase(FramePhase::Draw, drawn - current);
+                    if drew {
+                        let (flush, present) = window.swap_buffers();
+                        self.cx.record_frame_phase(FramePhase::Flush, flush);
+                        self.cx.record_frame_phase(FramePhase::Present, present);
+                        self.cx.finish_frame(Instant::now());
                     }
 
                     // Un-cloak
@@ -757,9 +767,12 @@ impl ApplicationHandler<UserEvent> for Application {
 
         event_loop.set_control_flow(self.control_flow);
 
+        let start = Instant::now();
         Runtime::drain_pending_work();
 
         self.event_manager.flush_events(self.cx.context(), |_| {});
+        let events_done = Instant::now();
+        self.cx.record_frame_phase(FramePhase::Events, events_done - start);
 
         self.cx.process_style_updates();
 
@@ -768,8 +781,11 @@ impl ApplicationHandler<UserEvent> for Application {
                 window.window().request_redraw();
             }
         }
+        let style_done = Instant::now();
+        self.cx.record_frame_phase(FramePhase::Style, style_done - events_done);
 
         self.cx.process_visual_updates();
+        self.cx.record_frame_phase(FramePhase::Layout, style_done.elapsed());
 
         #[cfg(feature = "accesskit")]
         {
@@ -879,7 +895,9 @@ impl ApplicationHandler<UserEvent> for Application {
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        let start = Instant::now();
         self.cx.process_timers();
+        self.cx.record_frame_phase(FramePhase::Events, start.elapsed());
         self.cx.emit_scheduled_events();
     }
 

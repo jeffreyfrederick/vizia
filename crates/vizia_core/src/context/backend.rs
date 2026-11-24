@@ -124,6 +124,18 @@ impl BackendContext {
         &mut self.0
     }
 
+    /// Records the duration of one phase of the frame currently being produced.
+    /// Event, style and layout time accumulate until [`finish_frame`](Self::finish_frame).
+    pub fn record_frame_phase(&mut self, phase: FramePhase, duration: Duration) {
+        self.0.frame_timings.pending.add(phase, duration);
+    }
+
+    /// Marks the frame being produced as presented. Its timings become available
+    /// through `frame_timings()` on the contexts.
+    pub fn finish_frame(&mut self, presented_at: Instant) {
+        self.0.frame_timings.finish_frame(presented_at);
+    }
+
     /// Calls the draw system.
     pub fn draw(
         &mut self,

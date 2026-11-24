@@ -5,6 +5,7 @@ mod access;
 pub mod backend;
 mod draw;
 mod event;
+mod frame_timings;
 mod proxy;
 mod resource;
 
@@ -31,6 +32,8 @@ use hashbrown::{HashMap, HashSet, hash_map::Entry};
 pub use access::*;
 pub use draw::*;
 pub use event::*;
+pub(crate) use frame_timings::FrameTimingState;
+pub use frame_timings::{FramePhase, FrameTimings};
 pub use proxy::*;
 pub use resource::*;
 
@@ -130,6 +133,8 @@ pub struct Context {
     pub ime_state: ImeState,
 
     pub(crate) drop_data: Option<DropData>,
+
+    pub(crate) frame_timings: FrameTimingState,
 }
 
 impl Default for Context {
@@ -214,6 +219,7 @@ impl Context {
             ime_state: Default::default(),
 
             drop_data: None,
+            frame_timings: FrameTimingState::default(),
         };
 
         result.tree.set_window(Entity::root(), true);
@@ -265,6 +271,12 @@ impl Context {
     /// Returns the scale factor of the display.
     pub fn scale_factor(&self) -> f32 {
         self.style.dpi_factor as f32
+    }
+
+    /// Returns per-phase timings of the most recently presented frame, as
+    /// reported by the windowing backend. All zero if the backend does not report them.
+    pub fn frame_timings(&self) -> FrameTimings {
+        self.frame_timings.last
     }
 
     /// Mark the application as needing to rerun the draw method

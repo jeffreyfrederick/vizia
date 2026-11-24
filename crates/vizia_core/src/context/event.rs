@@ -87,6 +87,7 @@ pub struct EventContext<'a> {
     clipboard: &'a mut Box<dyn ClipboardProvider>,
     pub(crate) event_proxy: &'a mut Option<Box<dyn crate::context::EventProxy>>,
     pub(crate) drop_data: &'a mut Option<DropData>,
+    pub(crate) frame_timings: &'a FrameTimings,
     pub windows: &'a mut HashMap<Entity, WindowState>,
 }
 
@@ -139,6 +140,7 @@ impl<'a> EventContext<'a> {
             clipboard: &mut cx.clipboard,
             event_proxy: &mut cx.event_proxy,
             drop_data: &mut cx.drop_data,
+            frame_timings: &cx.frame_timings.last,
             windows: &mut cx.windows,
         }
     }
@@ -172,6 +174,7 @@ impl<'a> EventContext<'a> {
             clipboard: &mut cx.clipboard,
             event_proxy: &mut cx.event_proxy,
             drop_data: &mut cx.drop_data,
+            frame_timings: &cx.frame_timings.last,
             windows: &mut cx.windows,
         }
     }
@@ -274,6 +277,12 @@ impl<'a> EventContext<'a> {
     /// Returns the scale factor.
     pub fn scale_factor(&self) -> f32 {
         self.style.dpi_factor as f32
+    }
+
+    /// Returns per-phase timings of the most recently presented frame, as
+    /// reported by the windowing backend. All zero if the backend does not report them.
+    pub fn frame_timings(&self) -> FrameTimings {
+        *self.frame_timings
     }
 
     /// Converts logical points to physical pixels.

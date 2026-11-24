@@ -252,9 +252,13 @@ impl WinState {
         );
     }
 
-    pub fn swap_buffers(&mut self) {
+    /// Flushes Skia's GPU work and presents. Returns the time spent in each step.
+    pub fn swap_buffers(&mut self) -> (Duration, Duration) {
+        let start = Instant::now();
         self.gr_context.flush_and_submit();
+        let flushed = Instant::now();
         self.gl_surface.swap_buffers(&self.gl_context).expect("Failed to swap buffers");
+        (flushed - start, flushed.elapsed())
     }
 }
 

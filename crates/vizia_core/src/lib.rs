@@ -76,7 +76,7 @@ pub mod prelude {
     pub use super::animation::{Animation, AnimationBuilder, KeyframeBuilder};
     pub use super::context::{
         AccessContext, AccessNode, Context, ContextProxy, DataContext, DrawContext, EmitContext,
-        EventContext, ProxyEmitError, WindowState,
+        EventContext, FramePhase, FrameTimings, ProxyEmitError, WindowState,
     };
     pub use super::entity::Entity;
     pub use super::environment::{Environment, EnvironmentEvent, ThemeMode};
