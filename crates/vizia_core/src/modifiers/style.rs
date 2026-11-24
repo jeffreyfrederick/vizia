@@ -468,7 +468,7 @@ pub trait StyleModifiers: internal::Modifiable {
         let _current = self.current();
         value.set_or_bind(self.context(), move |cx, v| {
             cx.style.border_width.insert(entity, v.get_value(cx).into());
-            cx.cache.path.remove(entity);
+            cx.cache.invalidate_path(entity);
             cx.style.system_flags |= SystemFlags::RELAYOUT | SystemFlags::REDRAW;
             cx.set_system_flags(entity, SystemFlags::RELAYOUT | SystemFlags::REDRAW);
         });

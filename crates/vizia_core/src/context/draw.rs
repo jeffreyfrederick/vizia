@@ -12,7 +12,7 @@ use vizia_style::LengthPercentageOrAuto;
 
 use hashbrown::HashMap;
 
-use crate::cache::CachedData;
+use crate::cache::{CachedData, ShadowCache, ShadowLayer};
 use crate::events::ViewHandler;
 use crate::prelude::*;
 use crate::resource::{ImageOrSvg, ResourceManager};
@@ -470,11 +470,20 @@ impl DrawContext<'_> {
     }
 
     pub fn path(&mut self) -> Path {
+        let bounds = self.bounds();
+        self.local_path().make_offset(bounds.top_left())
+    }
+
+    /// The cached outline path of the current view, relative to its top-left corner.
+    ///
+    /// Unlike [`path`](Self::path) this returns the same `Path` (same identity)
+    /// every frame until the outline changes, which lets Skia reuse GPU-side
+    /// caches. Draw it under a canvas translation to the view's position.
+    fn local_path(&mut self) -> Path {
         if self.cache.path.get(self.current).is_none() {
             self.cache.path.insert(self.current, self.build_path(self.bounds(), (0.0, 0.0)));
         }
-        let bounds = self.bounds();
-        self.cache.path.get(self.current).unwrap().make_offset(bounds.top_left())
+        self.cache.path.get(self.current).unwrap().clone()
     }
 
     /// Get the vector path of the current view.
@@ -651,7 +660,8 @@ impl DrawContext<'_> {
     pub fn draw_background(&mut self, canvas: &Canvas) {
         let background_color = self.background_color();
         if background_color.a() > 0 {
-            let path = self.path();
+            let path = self.local_path();
+            let bounds = self.bounds();
 
             let mut paint = Paint::default();
             paint.set_color(skia_safe::Color::from_argb(
@@ -661,7 +671,10 @@ impl DrawContext<'_> {
                 background_color.b(),
             ));
             paint.set_anti_alias(true);
+            canvas.save();
+            canvas.translate((bounds.x, bounds.y));
             canvas.draw_path(&path, &paint);
+            canvas.restore();
         }
 
         self.draw_background_images(canvas);
@@ -732,71 +745,92 @@ impl DrawContext<'_> {
 
     /// Draw shadows for the current view.
     pub fn draw_shadows(&mut self, canvas: &Canvas) {
-        if let Some(shadows) = self.shadows() {
-            if shadows.is_empty() {
-                return;
-            }
-
-            let bounds = self.bounds();
-
-            let path = self.build_path(bounds, (0.0, 0.0)).make_offset(bounds.top_left());
-
-            for shadow in shadows.iter().rev() {
-                let shadow_color = shadow.color.unwrap_or_default();
-
-                let shadow_x_offset = shadow.x_offset.to_px().unwrap_or(0.0) * self.scale_factor();
-                let shadow_y_offset = shadow.y_offset.to_px().unwrap_or(0.0) * self.scale_factor();
-                let spread_radius =
-                    shadow.spread_radius.as_ref().and_then(|l| l.to_px()).unwrap_or(0.0)
-                        * self.scale_factor();
-
-                let blur_radius =
-                    shadow.blur_radius.as_ref().and_then(|br| br.to_px()).unwrap_or(0.0);
-
-                if shadow_color.a() == 0
-                    || (shadow_x_offset == 0.0
-                        && shadow_y_offset == 0.0
-                        && spread_radius == 0.0
-                        && blur_radius == 0.0)
-                {
-                    continue;
-                }
-
-                let mut shadow_paint = Paint::default();
-
-                let outset = if shadow.inset { -spread_radius } else { spread_radius };
-
-                shadow_paint.set_style(PaintStyle::Fill);
-
-                let mut shadow_path = self.build_path(bounds, (outset, outset));
-                shadow_path = shadow_path.make_offset(bounds.top_left());
-
-                shadow_paint.set_color(shadow_color);
-
-                if blur_radius > 0.0 {
-                    shadow_paint.set_mask_filter(MaskFilter::blur(
-                        BlurStyle::Normal,
-                        blur_radius / 2.0,
-                        false,
-                    ));
-                }
-
-                shadow_path = shadow_path.make_offset((shadow_x_offset, shadow_y_offset));
-
-                if shadow.inset {
-                    shadow_path = path.op(&shadow_path, skia_safe::PathOp::Difference).unwrap();
-                }
-
-                canvas.save();
-                canvas.clip_path(
-                    &path,
-                    if shadow.inset { ClipOp::Intersect } else { ClipOp::Difference },
-                    true,
-                );
-                canvas.draw_path(&shadow_path, &shadow_paint);
-                canvas.restore();
-            }
+        let Some(shadows) = self.shadows() else { return };
+        if shadows.is_empty() {
+            return;
         }
+
+        let entity = self.current;
+        let scale_factor = self.scale_factor();
+        let stale = self
+            .cache
+            .shadows
+            .get(entity)
+            .is_none_or(|c| c.scale_factor != scale_factor || c.shadows != shadows);
+        if stale {
+            let layers = self.build_shadow_layers(&shadows, scale_factor);
+            self.cache.shadows.insert(entity, ShadowCache { shadows, scale_factor, layers });
+        }
+
+        let outline = self.local_path();
+        let bounds = self.bounds();
+        let Some(cache) = self.cache.shadows.get(entity) else { return };
+
+        canvas.save();
+        canvas.translate((bounds.x, bounds.y));
+        for layer in &cache.layers {
+            canvas.save();
+            canvas.clip_path(
+                &outline,
+                if layer.inset { ClipOp::Intersect } else { ClipOp::Difference },
+                true,
+            );
+            canvas.draw_path(&layer.path, &layer.paint);
+            canvas.restore();
+        }
+        canvas.restore();
+    }
+
+    /// Builds the shadow layers of the current view in view-local coordinates, in draw order.
+    fn build_shadow_layers(&mut self, shadows: &[Shadow], scale_factor: f32) -> Vec<ShadowLayer> {
+        let bounds = self.bounds();
+        let outline = self.local_path();
+        let mut layers = Vec::with_capacity(shadows.len());
+
+        for shadow in shadows.iter().rev() {
+            let shadow_color = shadow.color.unwrap_or_default();
+
+            let shadow_x_offset = shadow.x_offset.to_px().unwrap_or(0.0) * scale_factor;
+            let shadow_y_offset = shadow.y_offset.to_px().unwrap_or(0.0) * scale_factor;
+            let spread_radius =
+                shadow.spread_radius.as_ref().and_then(|l| l.to_px()).unwrap_or(0.0) * scale_factor;
+
+            let blur_radius = shadow.blur_radius.as_ref().and_then(|br| br.to_px()).unwrap_or(0.0);
+
+            if shadow_color.a() == 0
+                || (shadow_x_offset == 0.0
+                    && shadow_y_offset == 0.0
+                    && spread_radius == 0.0
+                    && blur_radius == 0.0)
+            {
+                continue;
+            }
+
+            let mut paint = Paint::default();
+            paint.set_style(PaintStyle::Fill);
+            paint.set_color(shadow_color);
+            paint.set_anti_alias(true);
+            if blur_radius > 0.0 {
+                paint.set_mask_filter(MaskFilter::blur(
+                    BlurStyle::Normal,
+                    blur_radius / 2.0,
+                    false,
+                ));
+            }
+
+            let outset = if shadow.inset { -spread_radius } else { spread_radius };
+            let mut path = self
+                .build_path(bounds, (outset, outset))
+                .make_offset((shadow_x_offset, shadow_y_offset));
+
+            if shadow.inset {
+                path = outline.op(&path, skia_safe::PathOp::Difference).unwrap_or(path);
+            }
+
+            layers.push(ShadowLayer { path, paint, inset: shadow.inset });
+        }
+
+        layers
     }
 
     /// Draw background images (including gradients) for the current view.

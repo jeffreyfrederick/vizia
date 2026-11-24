@@ -694,7 +694,7 @@ fn link_style_data(
     if style.border_width.link(entity, matched_rules, &style.custom_length_props) {
         should_relayout = true;
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.border_color.link(entity, matched_rules, &style.custom_color_props) {
@@ -709,42 +709,42 @@ fn link_style_data(
 
     if style.corner_top_left_shape.link(entity, matched_rules) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_top_right_shape.link(entity, matched_rules) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_bottom_left_shape.link(entity, matched_rules) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_bottom_right_shape.link(entity, matched_rules) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_top_left_radius.link(entity, matched_rules, &style.custom_length_props) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_top_right_radius.link(entity, matched_rules, &style.custom_length_props) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_bottom_left_radius.link(entity, matched_rules, &style.custom_length_props) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.corner_bottom_right_radius.link(entity, matched_rules, &style.custom_length_props) {
         should_redraw = true;
-        cache.path.remove(entity);
+        cache.invalidate_path(entity);
     }
 
     if style.outline_width.link(entity, matched_rules, &style.custom_length_props) {

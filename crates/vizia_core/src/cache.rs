@@ -2,7 +2,7 @@
 //! results. The main type here is CachedData, usually accessed via `cx.cache`.
 
 use crate::prelude::*;
-use skia_safe::{Matrix, Path};
+use skia_safe::{Matrix, Paint, Path};
 use vizia_storage::SparseSet;
 
 /// Stores data which can be cached between system runs.
@@ -18,6 +18,27 @@ pub struct CachedData {
     pub(crate) transform: SparseSet<Matrix>,
     pub(crate) clip_path: SparseSet<Option<Path>>,
     pub(crate) path: SparseSet<Path>,
+    pub(crate) shadows: SparseSet<ShadowCache>,
+}
+
+/// Shadow geometry of one view, in view-local coordinates.
+///
+/// Building shadow paths (and the path-op difference for inset shadows) is
+/// expensive, and a fresh `SkPath` every frame also defeats Skia's GPU caches
+/// (triangulated vertices and blur masks are keyed by path identity). So the
+/// layers are built once and reused until the shadows, scale factor or the
+/// view's outline path change.
+pub(crate) struct ShadowCache {
+    pub(crate) shadows: Vec<Shadow>,
+    pub(crate) scale_factor: f32,
+    /// In draw order.
+    pub(crate) layers: Vec<ShadowLayer>,
+}
+
+pub(crate) struct ShadowLayer {
+    pub(crate) path: Path,
+    pub(crate) paint: Paint,
+    pub(crate) inset: bool,
 }
 
 impl CachedData {
@@ -36,6 +57,13 @@ impl CachedData {
         self.transform.remove(entity);
         self.clip_path.remove(entity);
         self.path.remove(entity);
+        self.shadows.remove(entity);
+    }
+
+    /// Invalidates the cached outline path of `entity` and the geometry derived from it.
+    pub(crate) fn invalidate_path(&mut self, entity: Entity) {
+        self.path.remove(entity);
+        self.shadows.remove(entity);
     }
 
     /// Returns the bounding box of the entity, determined by the layout system.
