@@ -1303,16 +1303,15 @@ impl<'a> EventContext<'a> {
 
     /// Modifies the state of an existing timer with the provided `Timer` id.
     pub fn modify_timer(&mut self, timer: Timer, timer_function: impl Fn(&mut TimerState)) {
-        while let Some(next_timer_state) = self.running_timers.peek() {
-            if next_timer_state.id == timer {
-                let mut timer_state = self.running_timers.pop().unwrap();
-
-                (timer_function)(&mut timer_state);
-
-                self.running_timers.push(timer_state);
-
-                return;
+        // The running timers are a heap ordered by due time: the timer may be
+        // anywhere in it, and modifying it can change its place, so rebuild.
+        if self.running_timers.iter().any(|t| t.id == timer) {
+            let mut timers = std::mem::take(&mut *self.running_timers).into_vec();
+            for timer_state in timers.iter_mut().filter(|t| t.id == timer) {
+                (timer_function)(timer_state);
             }
+            *self.running_timers = timers.into();
+            return;
         }
 
         for pending_timer in self.timers.iter_mut() {
@@ -1327,16 +1326,8 @@ impl<'a> EventContext<'a> {
         timer: Timer,
         timer_function: impl Fn(&TimerState) -> T,
     ) -> Option<T> {
-        while let Some(next_timer_state) = self.running_timers.peek() {
-            if next_timer_state.id == timer {
-                let timer_state = self.running_timers.pop().unwrap();
-
-                let t = (timer_function)(&timer_state);
-
-                self.running_timers.push(timer_state);
-
-                return Some(t);
-            }
+        if let Some(timer_state) = self.running_timers.iter().find(|t| t.id == timer) {
+            return Some((timer_function)(timer_state));
         }
 
         for pending_timer in self.timers.iter() {

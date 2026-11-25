@@ -766,16 +766,15 @@ impl Context {
 
     /// Modifies the state of an existing timer with the provided `Timer` id.
     pub fn modify_timer(&mut self, timer: Timer, timer_function: impl Fn(&mut TimerState)) {
-        while let Some(next_timer_state) = self.running_timers.peek() {
-            if next_timer_state.id == timer {
-                let mut timer_state = self.running_timers.pop().unwrap();
-
-                (timer_function)(&mut timer_state);
-
-                self.running_timers.push(timer_state);
-
-                return;
+        // The running timers are a heap ordered by due time: the timer may be
+        // anywhere in it, and modifying it can change its place, so rebuild.
+        if self.running_timers.iter().any(|t| t.id == timer) {
+            let mut timers = std::mem::take(&mut self.running_timers).into_vec();
+            for timer_state in timers.iter_mut().filter(|t| t.id == timer) {
+                (timer_function)(timer_state);
             }
+            self.running_timers = timers.into();
+            return;
         }
 
         for pending_timer in self.timers.iter_mut() {
@@ -1224,5 +1223,30 @@ impl EmitContext for Context {
     fn cancel_scheduled(&mut self, handle: TimedEventHandle) {
         self.event_schedule =
             self.event_schedule.drain().filter(|item| item.ident != handle).collect();
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    /// `modify_timer` / `query_timer` on a running timer that isn't the next
+    /// one due used to spin forever (they only looked at the heap's top).
+    #[test]
+    fn modify_and_query_a_timer_that_is_not_next_due() {
+        let cx = &mut Context::default();
+        let soon = cx.add_timer(Duration::from_millis(10), None, |_, _| {});
+        let later = cx.add_timer(Duration::from_millis(500), None, |_, _| {});
+        cx.start_timer(soon);
+        cx.start_timer(later);
+        cx.modify_timer(later, |t| {
+            t.set_interval(Duration::from_millis(4));
+        });
+        let mut ecx = EventContext::new(cx);
+        ecx.modify_timer(later, |t| {
+            t.set_interval(Duration::from_millis(5));
+        });
+        assert_eq!(ecx.query_timer(later, |t| t.interval), Some(Duration::from_millis(5)));
+        assert_eq!(ecx.query_timer(soon, |t| t.interval), Some(Duration::from_millis(10)));
     }
 }
