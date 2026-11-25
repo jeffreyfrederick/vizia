@@ -108,6 +108,12 @@ pub struct Application {
     window_ids: HashMap<Entity, WindowId>,
     /// Earliest time the next frame may start, when the app limits the frame rate.
     next_frame_due: Option<Instant>,
+    /// When to re-read the display's refresh rate next (a mode change, or a move
+    /// to another display without a `Moved` event, changes it).
+    next_refresh_check: Option<Instant>,
+    /// Vblank phase of the window's display, while the frame slots are locked to it.
+    #[cfg(target_os = "macos")]
+    vblank: Option<crate::vblank::VblankClock>,
     #[cfg(feature = "accesskit")]
     accesskit_adapter: Option<accesskit_winit::Adapter>,
     #[cfg(feature = "accesskit")]
@@ -167,6 +173,9 @@ impl Application {
             windows: HashMap::new(),
             window_ids: HashMap::new(),
             next_frame_due: None,
+            next_refresh_check: None,
+            #[cfg(target_os = "macos")]
+            vblank: None,
             #[cfg(feature = "accesskit")]
             accesskit_adapter: None,
             #[cfg(feature = "accesskit")]
@@ -555,6 +564,10 @@ impl ApplicationHandler<UserEvent> for Application {
                 if window_entity == Entity::root() {
                     // The window may now be on a display with a different refresh rate.
                     self.cx.set_display_refresh_rate(monitor_refresh_rate(window.window()));
+                    // Re-read the vblank phase for the new display now rather than at
+                    // the next periodic check: until then the slots have the new
+                    // rate but no phase, and can sit on a vblank boundary.
+                    self.next_refresh_check = None;
                 }
                 self.cx.emit_window_event(
                     window_entity,
@@ -737,6 +750,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.cx.needs_refresh(window.entity);
                 if window.entity == Entity::root() {
                     self.cx.set_display_refresh_rate(monitor_refresh_rate(window.window()));
+                    self.next_refresh_check = None;
                 }
             }
             winit::event::WindowEvent::ThemeChanged(theme) => {
@@ -797,6 +811,30 @@ impl ApplicationHandler<UserEvent> for Application {
 
         let mut wants_redraw = self.cx.process_animations();
         let style_done = Instant::now();
+        if self.next_refresh_check.is_none_or(|t| style_done >= t) {
+            self.next_refresh_check = Some(style_done + REFRESH_RATE_CHECK_INTERVAL);
+            if let Some(window) =
+                self.window_ids.get(&Entity::root()).and_then(|id| self.windows.get(id))
+            {
+                self.cx.set_display_refresh_rate(monitor_refresh_rate(window.window()));
+                #[cfg(target_os = "macos")]
+                {
+                    use winit::platform::macos::MonitorHandleExtMacOS;
+                    let display = window.window().current_monitor().map(|m| m.native_id());
+                    let locked = self.cx.frame_slot_vblanks().is_some();
+                    match (locked, display) {
+                        (true, Some(id))
+                            if self.vblank.as_ref().is_some_and(|v| v.display() == id) => {}
+                        (true, Some(id)) => self.vblank = crate::vblank::VblankClock::new(id),
+                        _ => self.vblank = None,
+                    }
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let vblank_wake = self.vblank.as_mut().and_then(|v| v.poll(style_done));
+        #[cfg(not(target_os = "macos"))]
+        let vblank_wake: Option<Instant> = None;
         self.cx.record_frame_phase(FramePhase::Style, style_done - events_done);
 
         self.cx.process_visual_updates();
@@ -849,17 +887,26 @@ impl ApplicationHandler<UserEvent> for Application {
                     // doesn't divide the refresh rate; after a stall, restart from now
                     // instead of bursting to catch up.
                     self.next_frame_due = interval.map(|interval| {
-                        due.filter(|due| now < *due + interval).unwrap_or(now) + interval
+                        let next =
+                            due.filter(|due| now < *due + interval).unwrap_or(now) + interval;
+                        // Locked to the display: keep the slots at a fixed phase
+                        // after vblank, so the frames don't drift into the vblank
+                        // boundary (see `FRAME_SLOT_PHASE`).
+                        #[cfg(target_os = "macos")]
+                        if let (Some(v), Some(_)) = (&self.vblank, self.cx.frame_slot_vblanks()) {
+                            return v.align(next, FRAME_SLOT_PHASE, now);
+                        }
+                        next
                     });
                 }
             }
         }
 
         if self.control_flow != ControlFlow::Poll {
-            let wake = match (self.cx.get_next_timer_time(), deferred_until) {
-                (Some(timer), Some(due)) => Some(timer.min(due)),
-                (timer, due) => timer.or(due),
-            };
+            let wake = [self.cx.get_next_timer_time(), deferred_until, vblank_wake]
+                .into_iter()
+                .flatten()
+                .min();
             if let Some(wake) = wake {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             } else {
@@ -1245,10 +1292,111 @@ pub fn load_default_cursors(event_loop: &ActiveEventLoop) -> HashMap<CursorIcon,
 /// How early a rate-limited frame may start relative to its slot.
 const FRAME_SLOT_SLACK: Duration = Duration::from_micros(500);
 
+/// Where a frame slot starts when the slots are locked to the display, as a
+/// fraction of the period after the display link's vblank time.
+///
+/// Calibrated by measurement (macOS 26, M1, 59.95 Hz display, OpenGL on Metal,
+/// Metal System Trace): with slots at phase p the app's GPU commit lands at
+/// p - 0.32 of the window server's VSYNC interval (wake-up and ~1.5 ms of work
+/// after the slot, minus the display link's offset from VSYNC). Frames whose
+/// commit lands within ~0.1 of the VSYNC boundary are shown a vblank late or
+/// replaced; 0.2-0.9 is clean. 0.85 puts the commit mid-interval (0.53 measured,
+/// sd 0.03), so jitter has the most room either way.
+#[cfg(target_os = "macos")]
+const FRAME_SLOT_PHASE: f64 = 0.85;
+
+/// How often the display's refresh rate is re-read while the event loop runs.
+const REFRESH_RATE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Refresh rate (Hz) of the monitor the window is on, if the platform reports it.
+///
+/// winit reports the display mode's rate, which is rounded: a "60 Hz" mode often
+/// really refreshes at 59.94 or 59.951 Hz. Frame slots paced from the rounded
+/// value drift against the display (see `frame_slot_rate`), so the precise rate
+/// is used where the platform has it: the display link's nominal refresh period
+/// on macOS, DWM's composition rate on Windows.
 fn monitor_refresh_rate(window: &winit::window::Window) -> Option<f64> {
-    window
-        .current_monitor()
-        .and_then(|m| m.refresh_rate_millihertz())
-        .map(|mhz| mhz as f64 / 1000.0)
+    let monitor = window.current_monitor()?;
+    let rounded = monitor.refresh_rate_millihertz().map(|mhz| mhz as f64 / 1000.0);
+    #[cfg(target_os = "macos")]
+    let precise = {
+        use winit::platform::macos::MonitorHandleExtMacOS;
+        display_link_refresh_rate(monitor.native_id())
+    };
+    #[cfg(target_os = "windows")]
+    let precise = dwm_refresh_rate();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let precise = None;
+    refine_refresh_rate(rounded, precise)
+}
+
+/// Takes the precise rate when it agrees with the mode's rounded rate (within
+/// 1 Hz): DWM's rate is for the composition, not per monitor, and must not
+/// replace another display's rate.
+fn refine_refresh_rate(rounded: Option<f64>, precise: Option<f64>) -> Option<f64> {
+    let precise = precise.filter(|p| p.is_finite() && *p > 0.0);
+    match (rounded, precise) {
+        (Some(r), Some(p)) if (r - p).abs() < 1.0 => Some(p),
+        (None, p) => p,
+        (r, _) => r,
+    }
+}
+
+/// `CVDisplayLinkGetNominalOutputVideoRefreshPeriod` of a display, in Hz: an
+/// exact ratio from the display timing (e.g. 24000000 / 400330 = 59.951 Hz).
+/// CoreVideo is part of macOS, so no new dependency. CVDisplayLink is deprecated
+/// since macOS 15 in favour of view/screen display links, which only deliver
+/// callbacks; this only reads the period and never starts the link.
+#[cfg(target_os = "macos")]
+fn display_link_refresh_rate(display_id: u32) -> Option<f64> {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct CVTime {
+        time_value: i64,
+        time_scale: i32,
+        flags: i32,
+    }
+    const CV_TIME_IS_INDEFINITE: i32 = 1;
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVDisplayLinkCreateWithCGDisplay(display: u32, link: *mut *mut c_void) -> i32;
+        fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link: *mut c_void) -> CVTime;
+        fn CVDisplayLinkRelease(link: *mut c_void);
+    }
+
+    // SAFETY: the link is created, read and released here; it is never started.
+    let period = unsafe {
+        let mut link = std::ptr::null_mut();
+        if CVDisplayLinkCreateWithCGDisplay(display_id, &mut link) != 0 || link.is_null() {
+            return None;
+        }
+        let period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+        CVDisplayLinkRelease(link);
+        period
+    };
+    (period.flags & CV_TIME_IS_INDEFINITE == 0 && period.time_value > 0 && period.time_scale > 0)
+        .then(|| period.time_scale as f64 / period.time_value as f64)
+}
+
+/// DWM's composition refresh rate (`DWM_TIMING_INFO::rateRefresh`), in Hz.
+#[cfg(target_os = "windows")]
+#[allow(clippy::zero_ptr)]
+fn dwm_refresh_rate() -> Option<f64> {
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo},
+    };
+    // SAFETY: plain out-parameter call; cbSize is set as the API requires.
+    let rate = unsafe {
+        let mut info: DWM_TIMING_INFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<DWM_TIMING_INFO>() as u32;
+        // Since Windows 8.1 the window handle must be null. (`0 as HWND` like
+        // `set_cloak`'s cast: HWND is an integer in some windows-sys versions.)
+        if DwmGetCompositionTimingInfo(0 as HWND, &mut info) != 0 {
+            return None;
+        }
+        info.rateRefresh
+    };
+    (rate.uiDenominator != 0).then(|| rate.uiNumerator as f64 / rate.uiDenominator as f64)
 }

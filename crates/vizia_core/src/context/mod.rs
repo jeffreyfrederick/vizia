@@ -33,7 +33,9 @@ pub use access::*;
 pub use draw::*;
 pub use event::*;
 pub(crate) use frame_timings::FrameTimingState;
-pub use frame_timings::{FramePhase, FrameTimings};
+pub use frame_timings::{
+    FRAME_SLOT_RATE_TOLERANCE, FramePhase, FrameTimings, frame_slot_rate, frame_slot_vblanks,
+};
 pub use proxy::*;
 pub use resource::*;
 

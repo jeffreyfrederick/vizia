@@ -288,8 +288,11 @@ impl<'a> EventContext<'a> {
     /// Limits how many frames per second the backend presents (`None`: no limit
     /// beyond vsync). Redraws requested sooner are deferred, not dropped; frames
     /// are scheduled at a fixed rate so the average matches the limit even when
-    /// it doesn't divide the display's refresh rate. Backends that don't support
-    /// it ignore it.
+    /// it doesn't divide the display's refresh rate. When the display's rate is
+    /// (within 2%) a whole multiple of the limit, or below it, the schedule locks
+    /// to that rate instead (59.951 Hz for a 60 limit on a "60 Hz" display), see
+    /// [`frame_slot_rate`](crate::context::frame_slot_rate). Backends that don't
+    /// support it ignore it.
     pub fn set_max_frame_rate(&mut self, fps: Option<f64>) {
         self.frame_timings.max_frame_rate = fps;
     }

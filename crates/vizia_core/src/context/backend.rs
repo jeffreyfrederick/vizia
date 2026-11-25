@@ -142,6 +142,13 @@ impl BackendContext {
         self.0.frame_timings.min_frame_interval()
     }
 
+    /// When the frame slots are locked to the display, every how many vblanks a
+    /// frame is due (see `frame_slot_vblanks`). Backends that can see the
+    /// display's vblank times may align the slots' phase to them.
+    pub fn frame_slot_vblanks(&self) -> Option<u32> {
+        self.0.frame_timings.frame_slot_vblanks()
+    }
+
     /// Reports the refresh rate (Hz) of the display showing the window.
     pub fn set_display_refresh_rate(&mut self, hz: Option<f64>) {
         self.0.frame_timings.display_refresh_rate = hz;

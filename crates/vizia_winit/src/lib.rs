@@ -3,6 +3,8 @@
 
 pub mod application;
 mod convert;
+#[cfg(target_os = "macos")]
+mod vblank;
 pub mod window;
 pub mod window_modifiers;
 
