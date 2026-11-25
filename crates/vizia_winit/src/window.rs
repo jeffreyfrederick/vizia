@@ -445,6 +445,22 @@ impl Window {
     }
 }
 
+/// The user scale factor requested for the application (see `WindowEvent::SetUserScaleFactor`).
+///
+/// The context has a single scale factor shared by all windows, so the main window's
+/// `user_scale_factor` applies to every window.
+pub(crate) fn user_scale_factor(cx: &EventContext) -> f64 {
+    cx.windows
+        .get(&Entity::root())
+        .map_or(1.0, |window_state| window_state.window_description.user_scale_factor)
+}
+
+/// Converts a size in vizia's logical units (which include the user scale factor) to a winit
+/// size, whose logical units only include the system's DPI scaling.
+pub(crate) fn scaled_size(size: WindowSize, user_scale_factor: f64) -> LogicalSize<f64> {
+    LogicalSize::new(size.width as f64 * user_scale_factor, size.height as f64 * user_scale_factor)
+}
+
 impl View for Window {
     fn element(&self) -> Option<&'static str> {
         Some("window")
@@ -496,17 +512,39 @@ impl View for Window {
             }
 
             WindowEvent::SetSize(size) => {
-                let _ = self.window().request_inner_size(LogicalSize::new(size.width, size.height));
+                let user_scale_factor = user_scale_factor(cx);
+                let _ = self.window().request_inner_size(scaled_size(*size, user_scale_factor));
             }
 
+            // The min/max sizes are stored so that they can be reapplied when the user scale
+            // factor changes.
             WindowEvent::SetMinSize(size) => {
+                if let Some(window_state) = cx.windows.get_mut(&cx.current()) {
+                    window_state.window_description.min_inner_size = *size;
+                }
+                let user_scale_factor = user_scale_factor(cx);
                 self.window()
-                    .set_min_inner_size(size.map(|size| LogicalSize::new(size.width, size.height)));
+                    .set_min_inner_size(size.map(|size| scaled_size(size, user_scale_factor)));
             }
 
             WindowEvent::SetMaxSize(size) => {
+                if let Some(window_state) = cx.windows.get_mut(&cx.current()) {
+                    window_state.window_description.max_inner_size = *size;
+                }
+                let user_scale_factor = user_scale_factor(cx);
                 self.window()
-                    .set_max_inner_size(size.map(|size| LogicalSize::new(size.width, size.height)));
+                    .set_max_inner_size(size.map(|size| scaled_size(size, user_scale_factor)));
+            }
+
+            // Only records the requested factor; the application applies it to every window
+            // after the event queue has been flushed.
+            WindowEvent::SetUserScaleFactor(factor) => {
+                if factor.is_finite() && *factor > 0.0 {
+                    if let Some(window_state) = cx.windows.get_mut(&Entity::root()) {
+                        window_state.window_description.user_scale_factor = *factor;
+                    }
+                }
+                meta.consume();
             }
 
             WindowEvent::SetPosition(pos) => {

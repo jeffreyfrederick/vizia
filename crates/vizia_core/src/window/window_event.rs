@@ -118,6 +118,9 @@ pub enum WindowEvent {
     SetDecorations(bool),
     /// Sets whether the window remains on top of other windows.
     SetAlwaysOnTop(bool),
+    /// Sets the user scale factor, applied on top of the system's DPI scaling (1.0 = 100%).
+    /// Windows keep their logical size, so their physical size changes with the factor.
+    SetUserScaleFactor(f64),
     /// Emitted when mouse events have been captured.
     MouseCaptureEvent,
     /// Emitted when mouse events have been released.

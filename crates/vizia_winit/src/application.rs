@@ -2,7 +2,7 @@
 use crate::window::set_cloak;
 use crate::{
     convert::{winit_key_code_to_code, winit_key_to_key},
-    window::{WinState, Window},
+    window::{WinState, Window, scaled_size},
     window_modifiers::WindowModifiers,
 };
 #[cfg(feature = "accesskit")]
@@ -23,7 +23,7 @@ use vizia_core::{backend::*, events::EventManager};
 use vizia_reactive::Runtime;
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalPosition, PhysicalPosition, PhysicalSize},
     error::EventLoopError,
     event::ElementState,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
@@ -209,7 +209,8 @@ impl Application {
         #[allow(unused_variables)] owner: Option<Arc<winit::window::Window>>,
     ) -> Result<Arc<winit::window::Window>, Box<dyn Error>> {
         #[allow(unused_mut)]
-        let mut window_attributes = apply_window_description(window_description);
+        let mut window_attributes =
+            apply_window_description(window_description, self.window_description.user_scale_factor);
 
         let window_state = WinState::new(
             event_loop,
@@ -314,7 +315,7 @@ impl Application {
                     let offset = window_description.offset.unwrap_or_default();
                     let offset: PhysicalPosition<i32> = PhysicalPosition::from_logical(
                         LogicalPosition::new(offset.x, offset.y),
-                        window.scale_factor(),
+                        window.scale_factor() * self.window_description.user_scale_factor,
                     );
 
                     window.set_outer_position(PhysicalPosition::new(
@@ -332,6 +333,78 @@ impl Application {
             self.cx.set_display_refresh_rate(monitor_refresh_rate(&window));
         }
         Ok(window)
+    }
+
+    /// A scale factor applied on top of the system's DPI scaling, defaults to 1.0. It can be
+    /// changed at runtime with `WindowEvent::SetUserScaleFactor`.
+    ///
+    /// The context has a single scale factor, so this applies to every window of the application.
+    pub fn user_scale_factor(mut self, factor: f64) -> Self {
+        self.window_description.user_scale_factor = factor;
+        self
+    }
+
+    /// Applies a user scale factor requested with `WindowEvent::SetUserScaleFactor`.
+    ///
+    /// Every window keeps its logical size, so its physical size changes by the ratio of the new
+    /// factor to the old one (a maximized or fullscreen window keeps its physical size instead).
+    fn apply_user_scale_factor(&mut self) {
+        let Some(factor) = self
+            .cx
+            .0
+            .windows
+            .get(&Entity::root())
+            .map(|window_state| window_state.window_description.user_scale_factor)
+        else {
+            return;
+        };
+        let old_factor = self.window_description.user_scale_factor;
+        if factor == old_factor {
+            return;
+        }
+        self.window_description.user_scale_factor = factor;
+
+        for window_state in self.windows.values_mut() {
+            let window = window_state.window.clone();
+            let entity = window_state.entity;
+            self.cx.set_scale_factor(window.scale_factor() * factor);
+
+            // Update the size limits first so that they don't block the new size.
+            if let Some(description) =
+                self.cx.0.windows.get(&entity).map(|state| &state.window_description)
+            {
+                window.set_min_inner_size(
+                    description.min_inner_size.map(|size| scaled_size(size, factor)),
+                );
+                window.set_max_inner_size(
+                    description.max_inner_size.map(|size| scaled_size(size, factor)),
+                );
+            }
+
+            let mut size = window.inner_size();
+            if !window.is_maximized() && window.fullscreen().is_none() {
+                let ratio = factor / old_factor;
+                let requested = PhysicalSize::new(
+                    (size.width as f64 * ratio).round() as u32,
+                    (size.height as f64 * ratio).round() as u32,
+                );
+                match window.request_inner_size(requested) {
+                    // Applied immediately: a `Resized` event may not follow.
+                    Some(applied) => {
+                        window_state.resize(applied);
+                        size = applied;
+                    }
+                    // Lay out at the requested size now; `Resized` corrects it if the
+                    // system picks a different one.
+                    None => size = requested,
+                }
+            }
+
+            // Recomputes the window's logical size with the new scale factor.
+            self.cx.set_window_size(entity, size.width as f32, size.height as f32);
+            self.cx.needs_refresh(entity);
+            window.request_redraw();
+        }
     }
 
     /// Sets the default built-in theming to be ignored.
@@ -436,7 +509,7 @@ impl ApplicationHandler<UserEvent> for Application {
             self.cx.add_main_window(
                 Entity::root(),
                 &self.window_description,
-                main_window.scale_factor() as f32,
+                (main_window.scale_factor() * self.window_description.user_scale_factor) as f32,
             );
             self.cx.add_window(Window {
                 window: Some(main_window.clone()),
@@ -499,7 +572,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.cx.add_main_window(
                     window_entity,
                     &window_state.window_description,
-                    window.scale_factor() as f32,
+                    (window.scale_factor() * self.window_description.user_scale_factor) as f32,
                 );
 
                 window.set_visible(window_state.window_description.visible);
@@ -764,7 +837,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 scale_factor,
                 inner_size_writer: _,
             } => {
-                self.cx.set_scale_factor(scale_factor);
+                self.cx.set_scale_factor(scale_factor * self.window_description.user_scale_factor);
                 self.cx.needs_refresh(window.entity);
                 if window.entity == Entity::root() {
                     self.cx.set_display_refresh_rate(monitor_refresh_rate(window.window()));
@@ -822,6 +895,7 @@ impl ApplicationHandler<UserEvent> for Application {
         Runtime::drain_pending_work();
 
         self.event_manager.flush_events(self.cx.context(), |_| {});
+        self.apply_user_scale_factor();
         let events_done = Instant::now();
         self.cx.record_frame_phase(FramePhase::Events, events_done - start);
 
@@ -969,7 +1043,7 @@ impl ApplicationHandler<UserEvent> for Application {
                     self.cx.add_main_window(
                         *window_entity,
                         &window_state.window_description,
-                        window.scale_factor() as f32,
+                        (window.scale_factor() * self.window_description.user_scale_factor) as f32,
                     );
 
                     window.set_visible(window_state.window_description.visible);
@@ -1177,21 +1251,26 @@ impl WindowModifiers for Application {
     }
 }
 
-fn apply_window_description(description: &WindowDescription) -> WindowAttributes {
+/// Window sizes are scaled by the user scale factor (winit's logical units only include the
+/// system's DPI scaling). Positions are screen coordinates and are not.
+fn apply_window_description(
+    description: &WindowDescription,
+    user_scale_factor: f64,
+) -> WindowAttributes {
     let mut window_attributes = winit::window::Window::default_attributes();
 
-    window_attributes = window_attributes.with_title(&description.title).with_inner_size(
-        LogicalSize::new(description.inner_size.width, description.inner_size.height),
-    );
+    window_attributes = window_attributes
+        .with_title(&description.title)
+        .with_inner_size(scaled_size(description.inner_size, user_scale_factor));
 
     if let Some(min_inner_size) = description.min_inner_size {
-        window_attributes = window_attributes
-            .with_min_inner_size(LogicalSize::new(min_inner_size.width, min_inner_size.height));
+        window_attributes =
+            window_attributes.with_min_inner_size(scaled_size(min_inner_size, user_scale_factor));
     }
 
     if let Some(max_inner_size) = description.max_inner_size {
-        window_attributes = window_attributes
-            .with_max_inner_size(LogicalSize::new(max_inner_size.width, max_inner_size.height));
+        window_attributes =
+            window_attributes.with_max_inner_size(scaled_size(max_inner_size, user_scale_factor));
     }
 
     if let Some(position) = description.position {
