@@ -133,6 +133,24 @@ impl EventProxy for WinitEventProxy {
 }
 
 impl Application {
+    /// Time between frame slots, or `None` when this backend doesn't need them.
+    ///
+    /// On Windows a vsync'd `SwapBuffers` (WGL) blocks until vblank, so when the
+    /// slots would be locked 1:1 to the display (`frame_slot_vblanks() == Some(1)`)
+    /// the swap already presents exactly one frame per refresh. Slots at the
+    /// measured rate on top of it add nothing, and their phase against vblank is
+    /// arbitrary: when it settles just before vblank, frames miss it (measured on
+    /// a 59.951 Hz display: 11 refreshes without a new frame in 30 s, in one of
+    /// four runs). Frames then wait for the swap instead, as before the limit
+    /// existed. macOS keeps the slots: `flushBuffer` doesn't lock to vblank there.
+    fn frame_slot_interval(&self) -> Option<Duration> {
+        #[cfg(target_os = "windows")]
+        if self.window_description.vsync && self.cx.frame_slot_vblanks() == Some(1) {
+            return None;
+        }
+        self.cx.min_frame_interval()
+    }
+
     pub fn new<F>(content: F) -> Self
     where
         F: 'static + FnOnce(&mut Context),
@@ -875,7 +893,7 @@ impl ApplicationHandler<UserEvent> for Application {
         let mut deferred_until = None;
         if wants_redraw {
             let now = Instant::now();
-            match (self.cx.min_frame_interval(), self.next_frame_due) {
+            match (self.frame_slot_interval(), self.next_frame_due) {
                 // Allow a little early: wake-ups are late more often than early,
                 // and the swap still waits for vblank.
                 (Some(_), Some(due)) if now + FRAME_SLOT_SLACK < due => deferred_until = Some(due),
