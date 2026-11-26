@@ -517,6 +517,8 @@ impl ApplicationHandler<UserEvent> for Application {
                 on_create: None,
                 should_close: false,
                 custom_cursors: custom_cursors.clone(),
+                #[cfg(target_os = "macos")]
+                last_cursor: None,
             });
 
             self.cx.0.windows.insert(

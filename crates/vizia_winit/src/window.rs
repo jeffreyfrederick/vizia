@@ -384,6 +384,9 @@ pub struct Window {
     pub on_create: WindowCallback,
     pub should_close: bool,
     pub(crate) custom_cursors: Arc<HashMap<CursorIcon, CustomCursor>>,
+    /// macOS: the cursor last set, so a repeat of it is skipped (see `SetCursor`).
+    #[cfg(target_os = "macos")]
+    pub(crate) last_cursor: Option<vizia_core::prelude::CursorIcon>,
 }
 
 impl Window {
@@ -398,6 +401,8 @@ impl Window {
             on_create: None,
             should_close: false,
             custom_cursors: Default::default(),
+            #[cfg(target_os = "macos")]
+            last_cursor: None,
         }
         .build(cx, |cx| {
             cx.windows.insert(
@@ -425,6 +430,8 @@ impl Window {
             on_create: None,
             should_close: false,
             custom_cursors: Default::default(),
+            #[cfg(target_os = "macos")]
+            last_cursor: None,
         }
         .build(cx, |cx| {
             let parent_window = cx.parent_window();
@@ -492,6 +499,18 @@ impl View for Window {
             }
 
             WindowEvent::SetCursor(cursor) => {
+                // macOS: winit builds a new NSCursor on every call, and some (move, cell)
+                // are read from PDF and plist files each time; a view that sets its cursor
+                // on every mouse move during a drag spent ~16% of a core in that
+                // (ChipDAW's Overview drag). The window keeps the cursor it was given, so
+                // repeating it changes nothing: skip it.
+                #[cfg(target_os = "macos")]
+                {
+                    if self.last_cursor == Some(*cursor) {
+                        return;
+                    }
+                    self.last_cursor = Some(*cursor);
+                }
                 let Some(icon) = cursor_icon_to_cursor_icon(*cursor) else {
                     self.window().set_cursor_visible(false);
                     return;
