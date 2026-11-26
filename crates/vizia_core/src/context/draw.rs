@@ -977,6 +977,8 @@ impl DrawContext<'_> {
                                 );
 
                                 let mut paint = Paint::default();
+                                // Dithered: dark, shallow gradients band without it.
+                                paint.set_dither(true);
                                 paint.set_shader(shader);
                                 paint.set_anti_alias(true);
 
@@ -1039,6 +1041,8 @@ impl DrawContext<'_> {
                                 );
 
                                 let mut paint = Paint::default();
+                                // Dithered: dark, shallow gradients band without it.
+                                paint.set_dither(true);
                                 paint.set_shader(shader);
                                 paint.set_anti_alias(true);
 
