@@ -373,6 +373,11 @@ pub fn create_surface(
 
 type WindowCallback = Option<Box<dyn Fn(&mut EventContext)>>;
 
+/// macOS: a `WindowEvent::Redraw` is pending; `Application::about_to_wait` requests the
+/// redraw within the frame-rate limit's slots and clears it.
+#[cfg(target_os = "macos")]
+pub(crate) static REDRAW_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct Window {
     pub window: Option<Arc<winit::window::Window>>,
     pub on_close: WindowCallback,
@@ -599,6 +604,15 @@ impl View for Window {
             }
 
             WindowEvent::Redraw => {
+                // macOS: hand the request to `about_to_wait`, which asks for it within
+                // the frame-rate limit's slots like every other redraw. Asking the
+                // window directly bypassed the limit: `Handle::modify` emits this
+                // event, so a binding that modifies a view on every mouse move (a
+                // drag) presented a frame per event, ~125 fps under a 60 fps cap on a
+                // 320 Hz display. Elsewhere a vsync'd swap paces the frames anyway.
+                #[cfg(target_os = "macos")]
+                REDRAW_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(not(target_os = "macos"))]
                 self.window().request_redraw();
             }
 

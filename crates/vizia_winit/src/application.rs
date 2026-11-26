@@ -961,6 +961,11 @@ impl ApplicationHandler<UserEvent> for Application {
 
         wants_redraw |=
             self.cx.0.windows.iter().any(|(_, window_state)| !window_state.redraw_list.is_empty());
+        // A `WindowEvent::Redraw` (e.g. from `Handle::modify`) also goes through the slots.
+        #[cfg(target_os = "macos")]
+        {
+            wants_redraw |= crate::window::REDRAW_PENDING.swap(false, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // With a frame-rate limit, a redraw is requested only once the next frame
         // slot has come; until then the loop sleeps until that slot (or a timer).
