@@ -36,6 +36,13 @@ pub enum WindowEvent {
     WindowMoved(WindowPosition),
     /// Emitted when a file is dragged and then dropped onto the window.
     Drop(DropData),
+    /// Emitted when a file dragged from the operating system enters the
+    /// window (once per file; the drop or `FileHoverCancelled` follows).
+    /// The platform gives no position while the drag goes on: poll the
+    /// cursor if a preview needs one.
+    FileHover(PathBuf),
+    /// Emitted when a file drag leaves the window without a drop.
+    FileHoverCancelled,
     /// Emitted when a mouse button is double clicked.
     MouseDoubleClick(MouseButton),
     /// Emitted when a mouse button is triple clicked

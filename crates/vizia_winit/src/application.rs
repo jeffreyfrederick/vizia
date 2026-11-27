@@ -708,8 +708,12 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.cx.emit_window_event(window.entity, WindowEvent::Drop(DropData::File(path)));
             }
 
-            winit::event::WindowEvent::HoveredFile(_) => {}
-            winit::event::WindowEvent::HoveredFileCancelled => {}
+            winit::event::WindowEvent::HoveredFile(path) => {
+                self.cx.emit_window_event(window.entity, WindowEvent::FileHover(path));
+            }
+            winit::event::WindowEvent::HoveredFileCancelled => {
+                self.cx.emit_window_event(window.entity, WindowEvent::FileHoverCancelled);
+            }
             winit::event::WindowEvent::Focused(is_focused) => {
                 self.cx.emit_window_event(window.entity, WindowEvent::WindowFocused(is_focused));
 
